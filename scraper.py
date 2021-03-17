@@ -1,6 +1,7 @@
 import requests
 import sqlite3
 import re
+import threading
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 # Remove on release
@@ -24,6 +25,9 @@ prereqPattern = re.compile(r"[a-zA-Z]{4}\d{4}|and")
 
 
 def scrape_subject(subject_url, unit_id):
+    subject_connection = sqlite3.connect('testing.db')
+    sc = subject_connection.cursor()
+
     print(unit_id)
     subject_page = requests.get(subject_url)
     subject_soup = BeautifulSoup(subject_page.content, 'html.parser')
@@ -39,7 +43,7 @@ def scrape_subject(subject_url, unit_id):
 
     desc_text = desc_text.strip()
     desc_sql = '''UPDATE unit SET unitDescription = ? WHERE unitID = ?'''
-    c.execute(desc_sql, (desc_text, unit_id))
+    sc.execute(desc_sql, (desc_text, unit_id))
 
     # parse prerequisites
     prereq = info_table.find(class_='unit-prerequisites').find(class_='general-info-value').text.strip()
@@ -53,7 +57,9 @@ def scrape_subject(subject_url, unit_id):
                 prereq_group += 1
             else:
                 prereq_sql = '''INSERT INTO prerequisite (unitID, prereqGroup, prereqUID) VALUES (?, ?, ?)'''
-                c.execute(prereq_sql, (unit_id, prereq_group, word))
+                sc.execute(prereq_sql, (unit_id, prereq_group, word))
+
+    subject_connection.commit()
 
 
 # Home page scraping
@@ -73,24 +79,29 @@ while hasMorePages:
 
     unitElements = unitListTable.find_all('a')
 
+    threads = []
     for unitElement in unitElements:
         (thisUnitID, thisUnitTitle) = unitElement.find(class_='underline').text.split(maxsplit=1)
         thisOffering = int(unitElement.find(class_='unit-handbook-code').text.split(maxsplit=2)[1][0])
         if thisUnitID not in unitIDSet:
             unitLink = urljoin(startUrl, unitElement['href'])
-            # print(thisUnitID + ': ' + unitLink + ' --> ' + thisUnitTitle)
+
             c.execute('INSERT INTO unit (unitID, unitName) values (?, ?)', (thisUnitID, thisUnitTitle))
             unitIDSet.add(thisUnitID)
-            scrape_subject(unitLink, thisUnitID)
+
+            thread = threading.Thread(target=scrape_subject, args=(unitLink, thisUnitID))
+            thread.start()
+            threads.append(thread)
 
         offeringSQL = "UPDATE unit SET offering" + str(thisOffering) + " = 1 WHERE unitID = \"" + thisUnitID + "\""
         c.execute(offeringSQL)
 
-        # PREVENT FULL SCRAPE
-        # break
+    dbConnection.commit()
 
-    hasMorePages = False
-'''
+    for t in threads:
+        t.join()
+
+    # hasMorePages = False
     # Continue onto the next page
     nextPage = soup.find(class_='next_page')
     if 'disabled' in nextPage['class']:
@@ -99,6 +110,5 @@ while hasMorePages:
     else:
         relUrl = nextPage.find('a')['href']
         url = urljoin(startUrl, relUrl)
-'''
 
 dbConnection.commit()
